@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+data/
+*.db
+*.db-journal
+.env
+.env.local
+npm-debug.log*
+.DS_Store
+public/uploads/
+.claude/settings.local.json

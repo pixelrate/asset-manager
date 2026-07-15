@@ -1,0 +1,299 @@
+// Asset Manager data model.
+// SQLite for local dev; kept Postgres-portable (no native enums — string fields
+// with app-level constants in src/lib/constants.ts) so switching to Railway
+// Postgres is just: provider = "postgresql" + DATABASE_URL, then `prisma db push`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Tenancy, users, billing ----------
+
+model Tenant {
+  id             String   @id @default(cuid())
+  name           String
+  plan           String   @default("FREE") // FREE | PRO
+  planStatus     String   @default("ACTIVE") // ACTIVE | PAST_DUE | CANCELED
+  itemLimit      Int      @default(200) // enforced for FREE plan; PRO = unlimited (0)
+  qrBaseUrl      String? // overrides APP_URL for QR label contents
+  lastItemNumber Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  users        User[]
+  items        Item[]
+  categories   Category[]
+  locations    Location[]
+  maps         GarageMap[]
+  tags         Tag[]
+  templates    ListingTemplate[]
+  customFields CustomFieldDef[]
+  inviteCodes  InviteCode[]
+  activities   ActivityLog[]
+}
+
+model User {
+  id           String    @id @default(cuid())
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         String    @default("OWNER") // OWNER | ADMIN | MEMBER
+  isSuperAdmin Boolean   @default(false)
+  status       String    @default("PENDING") // PENDING | ACTIVE | REJECTED | SUSPENDED
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+
+  activities  ActivityLog[]
+  recentViews RecentView[]
+}
+
+model InviteCode {
+  id        String    @id @default(cuid())
+  tenantId  String
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code      String    @unique
+  role      String    @default("MEMBER")
+  expiresAt DateTime?
+  usedById  String?
+  createdAt DateTime  @default(now())
+}
+
+// ---------- Taxonomy ----------
+
+model Category {
+  id        String     @id @default(cuid())
+  tenantId  String
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  parentId  String?
+  parent    Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children  Category[] @relation("CategoryTree")
+  sortOrder Int        @default(0)
+  items     Item[]
+
+  @@index([tenantId])
+}
+
+model Tag {
+  id       String    @id @default(cuid())
+  tenantId String
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name     String
+  items    ItemTag[]
+
+  @@unique([tenantId, name])
+}
+
+model ItemTag {
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tagId  String
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, tagId])
+}
+
+// ---------- Locations & garage map ----------
+
+model GarageMap {
+  id        String     @id @default(cuid())
+  tenantId  String
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  imagePath String
+  createdAt DateTime   @default(now())
+  locations Location[]
+
+  @@index([tenantId])
+}
+
+model Location {
+  id          String     @id @default(cuid())
+  tenantId    String
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  type        String     @default("AREA") // AREA | SHELF | CABINET | BIN | WORKBENCH | PEGBOARD | STORAGE_UNIT | VEHICLE | OTHER
+  description String?
+  parentId    String?
+  parent      Location?  @relation("LocationTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Location[] @relation("LocationTree")
+  qrCode      String     @unique
+  mapId       String?
+  map         GarageMap? @relation(fields: [mapId], references: [id], onDelete: SetNull)
+  mapX        Float? // percent 0-100 on the map image
+  mapY        Float?
+  createdAt   DateTime   @default(now())
+  items       Item[]
+
+  @@index([tenantId])
+}
+
+// ---------- Items ----------
+
+model Item {
+  id         String @id @default(cuid())
+  tenantId   String
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  itemNumber Int // sequential per tenant
+  barcode    String @unique // numeric Code-128 payload
+  qrCode     String @unique // short slug for /qr/[code]
+
+  name         String
+  description  String?
+  categoryId   String?
+  category     Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brand        String?
+  model        String?
+  serialNumber String?
+  quantity     Int       @default(1)
+  owner        String?
+  condition    String? // NEW | LIKE_NEW | GOOD | FAIR | POOR | PARTS_ONLY
+  notes        String?
+  favorite     Boolean   @default(false)
+
+  locationId String?
+  location   Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  decision      String    @default("UNDECIDED") // UNDECIDED | KEEP | SELL | DONATE | TRASH
+  sellingStatus String    @default("NOT_LISTED") // NOT_LISTED | READY_FOR_PHOTOS | PHOTOGRAPHED | LISTED | OFFER_RECEIVED | PENDING_PICKUP | SOLD
+  marketplace   String? // FACEBOOK | EBAY | CRAIGSLIST | OFFERUP | LOCAL | FRIEND | AUCTION
+  listingUrl    String?
+  listedAt      DateTime?
+  soldAt        DateTime?
+  salePrice     Float?
+  buyer         String?
+  saleNotes     String?
+
+  purchasePrice  Float?
+  estimatedValue Float?
+  minPrice       Float?
+
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  createdById String?
+
+  photos          Photo[]
+  attachments     Attachment[]
+  tags            ItemTag[]
+  maintenanceLogs MaintenanceLog[]
+  customValues    CustomFieldValue[]
+  recentViews     RecentView[]
+
+  @@unique([tenantId, itemNumber])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, locationId])
+}
+
+model Photo {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  path      String
+  isPrimary Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([itemId])
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  path      String
+  filename  String
+  size      Int      @default(0)
+  mimeType  String?
+  createdAt DateTime @default(now())
+
+  @@index([itemId])
+}
+
+model MaintenanceLog {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  date      DateTime
+  type      String // e.g. Oil change, Calibration, Repair
+  cost      Float?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  @@index([itemId])
+}
+
+// ---------- Custom fields ----------
+
+model CustomFieldDef {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name     String
+  type     String  @default("TEXT") // TEXT | NUMBER | DATE | BOOLEAN | SELECT
+  options  String? // newline-separated options for SELECT
+
+  values CustomFieldValue[]
+
+  @@unique([tenantId, name])
+}
+
+model CustomFieldValue {
+  id      String         @id @default(cuid())
+  itemId  String
+  item    Item           @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  fieldId String
+  field   CustomFieldDef @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  value   String
+
+  @@unique([itemId, fieldId])
+}
+
+// ---------- Selling helpers ----------
+
+model ListingTemplate {
+  id          String  @id @default(cuid())
+  tenantId    String
+  tenant      Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  marketplace String?
+  body        String // placeholders: {{name}} {{brand}} {{model}} {{condition}} {{price}} {{description}} {{category}}
+
+  @@index([tenantId])
+}
+
+// ---------- Audit & activity ----------
+
+model ActivityLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String // CREATE | UPDATE | DELETE | RESTORE | ...
+  entityType String // ITEM | LOCATION | CATEGORY | ...
+  entityId   String?
+  detail     String?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+model RecentView {
+  id       String   @id @default(cuid())
+  userId   String
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId   String
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  viewedAt DateTime @default(now())
+
+  @@unique([userId, itemId])
+  @@index([userId, viewedAt])
+}
